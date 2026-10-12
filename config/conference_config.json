@@ -1,0 +1,13 @@
+{
+    "support_contact": "@mbconf_support",
+    "tech_contact": "@zobko",
+    "main_participants": {
+        "usernames_csv": "115users.csv",
+        "extra_user_ids": [619714930]
+    },
+    "debate_companies": [
+        {"code": "VTB", "title": "ВТБ", "capacity": 32},
+        {"code": "AlfaNSeverstal", "title": "Альфа и Северсталь", "capacity": 42},
+        {"code": "B1", "title": "Б1", "capacity": 41}
+    ]
+}
