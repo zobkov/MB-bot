@@ -56,7 +56,7 @@ Postgres и Redis из `.env` **общие с ботом отбора волон
 
 **Database** (`database/`): `models.py` — модели, `db.py` — async engine/sessionmaker, `repositories.py` — весь доступ к БД (`UserRepository`, `SettingsRepository`, `DebateRepository`); никаких запросов напрямую из диалогов/хендлеров. Паттерн сессии: `session = await db.get_session()` / `try` / `finally: await session.close()`. `create_tables()` на старте + миграции в `alembic/versions/` — держать в синхроне (`alembic check`). Alembic работает через `psycopg2` (sync), бот — через `asyncpg`.
 
-**Admin commands** (`bot/handlers.py`, проверка `check_is_admin` по `config.admin_ids`): `/role 1|2`, `/user <user_id|username>`, `/open_debates [1|0]` (без аргумента — показать статус), `/export_debates` (CSV `user_id,username,debate_choice` с алиасами `VTB`, `AlfaNSeverstal`, `B1` = `code` компании). Не-админам в меню команд показывается только `/start` (`bot/keyboards/command_menu.py`, админам — через `BotCommandScopeChat`).
+**Admin commands** (`bot/handlers.py`, проверка `check_is_admin` по `config.admin_ids`): `/role 1|2`, `/user <user_id|username>`, `/open_debates [1|0]` (без аргумента — показать статус), `/cancel_debates [user_id|username]` (удалить запись; без аргумента — свою), `/export_debates` (CSV `user_id,username,debate_choice` с алиасами `VTB`, `AlfaNSeverstal`, `B1` = `code` компании). Не-админам в меню команд показывается только `/start` (`bot/keyboards/command_menu.py`, админам — через `BotCommandScopeChat`).
 
 **Logging** (`utils/logging_config.py`, скопирован из бота волонтеров): файлы в `logs/` (`bot.log`, `database.log`, `errors.log`, `user_actions.log`). Использовать хелперы `log_user_action`, `log_db_operation`, `log_error` вместо прямого `logging`.
 

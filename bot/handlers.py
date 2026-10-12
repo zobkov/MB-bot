@@ -64,6 +64,13 @@ async def cmd_role(message: Message, command: CommandObject, dialog_manager: Dia
     await open_menu_for_role(dialog_manager, user)
 
 
+async def _find_user(user_repo: UserRepository, arg: str) -> User | None:
+    """Поиск по user_id или username (с @ или без)"""
+    if arg.isdigit():
+        return await user_repo.get_user_by_telegram_id(int(arg))
+    return await user_repo.get_user_by_username(normalize_username(arg) or "")
+
+
 @router.message(Command("user"))
 async def cmd_user(message: Message, command: CommandObject, db: Database, config: Config):
     """/user [user_id|username] — данные о пользователе из БД"""
@@ -78,12 +85,7 @@ async def cmd_user(message: Message, command: CommandObject, db: Database, confi
 
     session = await db.get_session()
     try:
-        user_repo = UserRepository(session)
-        if arg.isdigit():
-            user = await user_repo.get_user_by_telegram_id(int(arg))
-        else:
-            user = await user_repo.get_user_by_username(normalize_username(arg) or "")
-
+        user = await _find_user(UserRepository(session), arg)
         if user is None:
             await message.answer(f"Пользователь <code>{escape(arg)}</code> не найден в БД")
             return
@@ -110,6 +112,41 @@ async def cmd_user(message: Message, command: CommandObject, db: Database, confi
         f"Админ: {'да' if check_is_admin(user.telegram_id, config) else 'нет'}\n"
         f"Дебаты: {escape(debates)}\n"
         f"Первый вход: {user.created_at:%d.%m.%Y %H:%M}"
+    )
+
+
+@router.message(Command("cancel_debates"))
+async def cmd_cancel_debates(message: Message, command: CommandObject, db: Database, config: Config):
+    """/cancel_debates [user_id|username] — удалить запись на дебаты (без аргумента — свою)"""
+    if not check_is_admin(message.from_user.id, config):
+        await message.answer(ACCESS_DENIED)
+        return
+
+    arg = (command.args or "").strip() or str(message.from_user.id)
+
+    session = await db.get_session()
+    try:
+        user = await _find_user(UserRepository(session), arg)
+        if user is None:
+            await message.answer(f"Пользователь <code>{escape(arg)}</code> не найден в БД")
+            return
+
+        debate_repo = DebateRepository(session)
+        code = await debate_repo.cancel(user.id)
+        seats = {s.code: s for s in await debate_repo.get_seats()}
+    finally:
+        await session.close()
+
+    who = f"@{escape(user.telegram_username)}" if user.telegram_username else f"<code>{user.telegram_id}</code>"
+    if code is None:
+        await message.answer(f"У {who} нет записи на дебаты")
+        return
+
+    log_user_action(message.from_user.id, message.from_user.username, "ADMIN_CANCEL_DEBATES", f"{user.telegram_id}: {code}")
+    s = seats.get(code)
+    await message.answer(
+        f"Запись {who} на <b>{escape(s.title if s else code)}</b> удалена"
+        + (f"\nСвободно: {s.free}/{s.capacity}" if s else "")
     )
 
 

@@ -14,6 +14,7 @@ LEXICON_ADMIN_COMMANDS_RU: dict[str, str] = {
     "/role": "[1|2] Смена роли: 1 — топ-115, 2 — гость",
     "/user": "[user_id|username] Данные о пользователе",
     "/open_debates": "[1|0] Открыть/закрыть запись на дебаты",
+    "/cancel_debates": "[user_id|username] Удалить запись на дебаты (без аргумента — свою)",
     "/export_debates": "CSV с записями на дебаты",
 }
 

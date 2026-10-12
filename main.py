@@ -95,8 +95,6 @@ async def main():
         dp.errors.register(dialog_error_handler)
         logger.info("🔧 Роутеры и диалоги настроены")
 
-        await set_main_menu(bot, config.admin_ids)
-
         logger.info("✅ Бот готов к работе")
         await dp.start_polling(bot)
 

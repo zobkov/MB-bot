@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -206,6 +206,25 @@ class DebateRepository:
         except Exception as e:
             await self.session.rollback()
             log_error(e, "Ошибка при записи на дебаты", user_id)
+            raise
+
+    async def cancel(self, user_id: int) -> Optional[str]:
+        """Удалить запись пользователя на дебаты. Возвращает код компании или None, если записи не было.
+        Удаление только освобождает место, поэтому блокировка компании не нужна."""
+        try:
+            result = await self.session.execute(
+                delete(DebateRegistration)
+                .where(DebateRegistration.user_id == user_id)
+                .returning(DebateRegistration.company_code)
+            )
+            code = result.scalar_one_or_none()
+            await self.session.commit()
+            if code:
+                log_db_operation("DELETE", "conf_debate_registrations", f"{code} cancelled", user_id)
+            return code
+        except Exception as e:
+            await self.session.rollback()
+            log_error(e, "Ошибка при отмене записи на дебаты", user_id)
             raise
 
     async def export_rows(self) -> list[tuple[int, Optional[str], str]]:
