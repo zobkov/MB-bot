@@ -159,13 +159,8 @@ main_participant_dialog = Dialog(
     Window(
         Const(
             "<b>Главное меню</b>\n\n"
-            "Если ты видишь это меню, то ты можешь зарегестрироваться на дебаты. "
-            "После 19:00 нажми /start и замок должен пропасть с записи"
+            "Запись на дебаты закрыта. Скоро тут появятся новые функции"
         ),
-        SwitchTo(Const("Запись на дебаты"), id="to_debates", state=MainParticipantSG.debates, when="debates_open"),
-        # Пока запись закрыта, кнопка ничего не делает
-        Button(Const(f"{LOCK} Запись на дебаты"), id="debates_locked", when="debates_closed"),
-        # Программа пока закрыта для всех
         Button(Const(f"{LOCK} Программа"), id="program_locked"),
         SwitchTo(Const("Поддержка"), id="to_support", state=MainParticipantSG.support),
         state=MainParticipantSG.main,
