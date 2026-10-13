@@ -16,8 +16,7 @@ guest_dialog = Dialog(
     Window(
         Format(
             "<b>Главное меню</b>\n\n"
-            "Если ты видишь это меню, то ты не можешь зарегестрироваться на дебаты. "
-            "Срочно свяжись с {tech_contact} !!!!"
+            "Скоро здесь появится информация об открытых мероприятия МБ'26"
         ),
         SwitchTo(Const("Поддержка"), id="to_support", state=GuestSG.support),
         state=GuestSG.main,
