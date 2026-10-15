@@ -13,7 +13,7 @@ from bot.keyboards.command_menu import set_main_menu
 from bot.middlewares import LoggingMiddleware
 from config.config import load_config
 from database.db import Database
-from database.repositories import DebateRepository
+from database.repositories import DebateRepository, EventRepository
 from utils.logging_config import log_error, setup_logging
 
 
@@ -70,6 +70,7 @@ async def main():
         session = await db.get_session()
         try:
             await DebateRepository(session).sync_companies(config.conference.debate_companies)
+            await EventRepository(session).sync_events(config.conference.open_events)
         finally:
             await session.close()
         logger.info("🗄️ База данных инициализирована")

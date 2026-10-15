@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -30,6 +30,9 @@ class User(Base):
     debate_registration: Mapped[Optional["DebateRegistration"]] = relationship(
         "DebateRegistration", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
+    event_registrations: Mapped[list["EventRegistration"]] = relationship(
+        "EventRegistration", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class DebateCompany(Base):
@@ -54,6 +57,32 @@ class DebateRegistration(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="debate_registration")
+
+
+class OpenEvent(Base):
+    """Открытые мероприятия для гостей. Строки синхронизируются с conference_config.json при старте.
+    Строка мероприятия также служит замком (SELECT ... FOR UPDATE) при записи — см. EventRepository."""
+    __tablename__ = "conf_events"
+
+    code: Mapped[str] = mapped_column(String(50), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    schedule: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class EventRegistration(Base):
+    """Запись на открытое мероприятие: пользователь может записаться на несколько, но на каждое — один раз"""
+    __tablename__ = "conf_event_registrations"
+    __table_args__ = (UniqueConstraint("user_id", "event_code", name="uq_conf_event_registrations_user_event"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("conf_users.id", ondelete="CASCADE"), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(50), ForeignKey("conf_events.code"), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped["User"] = relationship("User", back_populates="event_registrations")
 
 
 class Setting(Base):

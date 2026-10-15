@@ -41,10 +41,22 @@ class DebateCompany:
 
 
 @dataclass
+class OpenEvent:
+    code: str         # алиас для экспорта (CPS, Lotakov, ...)
+    title: str        # название в тексте списка мероприятий и окна отмены
+    schedule: str     # дата и время текстом
+    description: str  # текст карточки мероприятия, HTML (<b>, <i>; & и < экранировать)
+    capacity: int
+    alias: str = ""   # короткое название для кнопки в списке; пусто — используется title
+
+
+@dataclass
 class ConferenceConfig:
     support_contact: str
     tech_contact: str
     debate_companies: list[DebateCompany]
+    # Открытые мероприятия (запись гостей), порядок — как в конфиге
+    open_events: list[OpenEvent] = field(default_factory=list)
     # Ники топ-115 в нижнем регистре и без @
     main_usernames: set[str] = field(default_factory=set)
     # user_id участников топ-115 без username
@@ -122,6 +134,7 @@ def load_config(path: str = None) -> Config:
         support_contact=json_config.get("support_contact", "@mbconf_support"),
         tech_contact=json_config.get("tech_contact", "@zobko"),
         debate_companies=[DebateCompany(**c) for c in json_config.get("debate_companies", [])],
+        open_events=[OpenEvent(**e) for e in json_config.get("open_events", [])],
         main_usernames=_load_main_usernames(participants.get("usernames_csv", "115users.csv")),
         main_user_ids={int(i) for i in participants.get("extra_user_ids", [])},
     )

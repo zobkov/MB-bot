@@ -7,7 +7,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.config import DebateCompany as DebateCompanyConfig
-from database.models import ROLE_GUEST, ROLE_MAIN, DebateCompany, DebateRegistration, Setting, User
+from config.config import OpenEvent as OpenEventConfig
+from database.models import (
+    ROLE_GUEST,
+    ROLE_MAIN,
+    DebateCompany,
+    DebateRegistration,
+    EventRegistration,
+    OpenEvent,
+    Setting,
+    User,
+)
 from utils.logging_config import log_db_operation, log_error
 
 
@@ -70,6 +80,7 @@ class UserRepository:
 
 class SettingsRepository:
     DEBATES_OPEN = "debates_open"
+    EVENTS_OPEN = "events_open"
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -234,5 +245,150 @@ class DebateRepository:
             .join(DebateRegistration, DebateRegistration.user_id == User.id)
             .join(DebateCompany, DebateCompany.code == DebateRegistration.company_code)
             .order_by(DebateCompany.sort_order, DebateRegistration.created_at)
+        )
+        return [tuple(r) for r in result.all()]
+
+
+@dataclass
+class EventSeats:
+    code: str
+    title: str
+    schedule: str
+    description: str
+    capacity: int
+    taken: int
+
+    @property
+    def free(self) -> int:
+        return max(self.capacity - self.taken, 0)
+
+
+class EventRepository:
+    """Запись на открытые мероприятия. Схема блокировок та же, что у DebateRepository."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def sync_events(self, events: list[OpenEventConfig]) -> None:
+        """Синхронизирует список мероприятий, описания и вместимость с конфигом"""
+        for order, event in enumerate(events):
+            values = {
+                "title": event.title,
+                "schedule": event.schedule,
+                "description": event.description,
+                "capacity": event.capacity,
+                "sort_order": order,
+            }
+            stmt = (
+                pg_insert(OpenEvent)
+                .values(code=event.code, **values)
+                .on_conflict_do_update(index_elements=[OpenEvent.code], set_=values)
+            )
+            await self.session.execute(stmt)
+        await self.session.commit()
+        log_db_operation("SYNC", "conf_events", f"{len(events)} events")
+
+    async def get_seats(self) -> list[EventSeats]:
+        taken = (
+            select(EventRegistration.event_code, func.count().label("taken"))
+            .group_by(EventRegistration.event_code)
+            .subquery()
+        )
+        result = await self.session.execute(
+            select(
+                OpenEvent.code, OpenEvent.title, OpenEvent.schedule, OpenEvent.description,
+                OpenEvent.capacity, func.coalesce(taken.c.taken, 0),
+            )
+            .outerjoin(taken, taken.c.event_code == OpenEvent.code)
+            .order_by(OpenEvent.sort_order)
+        )
+        return [
+            EventSeats(code=r[0], title=r[1], schedule=r[2], description=r[3], capacity=r[4], taken=r[5])
+            for r in result.all()
+        ]
+
+    async def get_user_events(self, user_id: int) -> set[str]:
+        result = await self.session.execute(
+            select(EventRegistration.event_code).where(EventRegistration.user_id == user_id)
+        )
+        return set(result.scalars().all())
+
+    async def register(self, user_id: int, event_code: str) -> RegisterResult:
+        """Записать пользователя на мероприятие в одной транзакции.
+
+        Строка мероприятия блокируется SELECT ... FOR UPDATE, поэтому проверка «есть ли место» и вставка
+        для одного мероприятия выполняются строго по очереди — вместимость не может быть превышена.
+        Повторная запись того же пользователя отсекается уникальностью (user_id, event_code).
+        """
+        try:
+            event = (
+                await self.session.execute(
+                    select(OpenEvent).where(OpenEvent.code == event_code).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if event is None:
+                await self.session.rollback()
+                return RegisterResult.UNKNOWN
+
+            exists = (
+                await self.session.execute(
+                    select(EventRegistration.id).where(
+                        EventRegistration.user_id == user_id, EventRegistration.event_code == event_code
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                await self.session.rollback()
+                return RegisterResult.SAME
+
+            taken = (
+                await self.session.execute(
+                    select(func.count()).select_from(EventRegistration)
+                    .where(EventRegistration.event_code == event_code)
+                )
+            ).scalar_one()
+            if taken >= event.capacity:
+                await self.session.rollback()
+                return RegisterResult.FULL
+
+            await self.session.execute(
+                pg_insert(EventRegistration)
+                .values(user_id=user_id, event_code=event_code)
+                .on_conflict_do_nothing(constraint="uq_conf_event_registrations_user_event")
+            )
+            await self.session.commit()
+            log_db_operation("INSERT", "conf_event_registrations", event_code, user_id)
+            return RegisterResult.OK
+        except Exception as e:
+            await self.session.rollback()
+            log_error(e, "Ошибка при записи на мероприятие", user_id)
+            raise
+
+    async def cancel(self, user_id: int, event_code: str) -> bool:
+        """Удалить запись пользователя на мероприятие. False — записи не было.
+        Удаление только освобождает место, поэтому блокировка мероприятия не нужна."""
+        try:
+            result = await self.session.execute(
+                delete(EventRegistration)
+                .where(EventRegistration.user_id == user_id, EventRegistration.event_code == event_code)
+                .returning(EventRegistration.id)
+            )
+            deleted = result.scalar_one_or_none() is not None
+            await self.session.commit()
+            if deleted:
+                log_db_operation("DELETE", "conf_event_registrations", f"{event_code} cancelled", user_id)
+            return deleted
+        except Exception as e:
+            await self.session.rollback()
+            log_error(e, "Ошибка при отмене записи на мероприятие", user_id)
+            raise
+
+    async def export_rows(self) -> list[tuple[int, Optional[str], str]]:
+        """(telegram_id, username, event_code) по всем записям"""
+        result = await self.session.execute(
+            select(User.telegram_id, User.telegram_username, EventRegistration.event_code)
+            .join(EventRegistration, EventRegistration.user_id == User.id)
+            .join(OpenEvent, OpenEvent.code == EventRegistration.event_code)
+            .order_by(OpenEvent.sort_order, EventRegistration.created_at)
         )
         return [tuple(r) for r in result.all()]

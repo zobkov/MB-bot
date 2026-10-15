@@ -13,3 +13,6 @@ class GuestSG(StatesGroup):
     """Главное меню гостя (роль по умолчанию)"""
     main = State()
     support = State()
+    events = State()          # Список открытых мероприятий
+    event = State()           # Карточка мероприятия: описание, места, запись/отмена
+    event_cancel = State()    # Подтверждение отмены записи
