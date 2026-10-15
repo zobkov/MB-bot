@@ -1,15 +1,19 @@
 import logging
+import os
 from html import escape
 from typing import Any
 
+from aiogram.enums import ContentType
 from aiogram.types import CallbackQuery
 from aiogram_dialog import Dialog, DialogManager, Window
+from aiogram_dialog.api.entities import MediaAttachment
 from aiogram_dialog.widgets.kbd import Button, Column, Select, SwitchTo
+from aiogram_dialog.widgets.media import DynamicMedia
 from aiogram_dialog.widgets.text import Const, Format
 
 from bot.dialogs.common import BACK_TEXT, support_window
 from bot.states import GuestSG
-from config.config import Config
+from config.config import PROJECT_ROOT, Config
 from database.db import Database
 from database.repositories import EventRepository, EventSeats, RegisterResult, SettingsRepository
 from services.users import get_db_user
@@ -19,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 CHECK = "✅"
 LOCK = "🔒"
+
+# Фото мероприятий: assets/open_events/<code>.jpg. Если файла нет — карточка без фото.
+# С фото текст карточки идет подписью, а у подписи лимит Telegram — 1024 символа.
+EVENT_PHOTOS_DIR = os.path.join(PROJECT_ROOT, "assets", "open_events")
 
 
 async def _events_open(db: Database) -> bool:
@@ -82,10 +90,12 @@ async def get_event_data(dialog_manager: DialogManager, **kwargs):
     if event is None:
         return {
             "title": "Мероприятие не найдено", "schedule": "", "description": "", "free": 0, "capacity": 0,
-            "status": "", "can_register": False, "is_full": False, "registered": False,
+            "status": "", "can_register": False, "is_full": False, "registered": False, "photo": None,
         }
 
     registered = code in mine
+    photo_path = os.path.join(EVENT_PHOTOS_DIR, f"{code}.jpg")
+    photo = MediaAttachment(ContentType.PHOTO, path=photo_path) if os.path.isfile(photo_path) else None
     return {
         "title": escape(event.title),
         "schedule": escape(event.schedule),
@@ -97,6 +107,7 @@ async def get_event_data(dialog_manager: DialogManager, **kwargs):
         "registered": registered,
         "can_register": not registered and event.free > 0,
         "is_full": not registered and event.free == 0,
+        "photo": photo,
     }
 
 
@@ -212,6 +223,7 @@ guest_dialog = Dialog(
         getter=get_events_data,
     ),
     Window(
+        DynamicMedia("photo", when="photo"),
         Format(
             "{description}\n\n"
             "🗓 {schedule}\n"
