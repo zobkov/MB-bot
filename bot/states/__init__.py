@@ -7,6 +7,11 @@ class MainParticipantSG(StatesGroup):
     support = State()
     debates = State()          # Запись на дебаты
     debates_confirm = State()  # Подтверждение смены компании
+    program = State()          # Программа: выбор дня
+    program_day = State()      # Мероприятия дня
+    program_item = State()     # Карточка мероприятия; у параллельных — запись/отмена
+    parallel_confirm = State() # Подтверждение смены записи в слоте
+    parallel_cancel = State()  # Подтверждение отмены записи
 
 
 class GuestSG(StatesGroup):

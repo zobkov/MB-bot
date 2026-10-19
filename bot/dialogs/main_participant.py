@@ -7,6 +7,7 @@ from aiogram_dialog.widgets.kbd import Button, Column, Select, SwitchTo
 from aiogram_dialog.widgets.text import Const, Format
 
 from bot.dialogs.common import BACK_TEXT, support_window
+from bot.dialogs.program import program_flags, program_windows
 from bot.states import MainParticipantSG
 from database.db import Database
 from database.repositories import DebateRepository, RegisterResult, SettingsRepository
@@ -34,7 +35,14 @@ async def _debates_open(db: Database) -> bool:
 async def get_main_data(dialog_manager: DialogManager, **kwargs):
     db: Database = dialog_manager.middleware_data["db"]
     is_open = await _debates_open(db)
-    return {"debates_open": is_open, "debates_closed": not is_open}
+    program_open, parallel_open = await program_flags(db)
+    return {
+        "debates_open": is_open,
+        "debates_closed": not is_open,
+        "program_open": program_open,
+        "program_closed": not program_open,
+        "parallel_open": program_open and parallel_open,
+    }
 
 
 async def get_debates_data(dialog_manager: DialogManager, **kwargs):
@@ -159,14 +167,27 @@ main_participant_dialog = Dialog(
     Window(
         Const(
             "<b>Главное меню</b>\n\n"
-            "Запись на дебаты закрыта. Скоро тут появятся новые функции"
+            "Запись на дебаты закрыта. Скоро тут появятся новые функции",
+            when="program_closed",
         ),
-        Button(Const(f"{LOCK} Программа"), id="program_locked"),
+        Const(
+            "<b>Главное меню</b>\n\n"
+            "В разделе «Программа» — расписание всех трех дней конференции",
+            when="program_open",
+        ),
+        Const(
+            "\nОткрыта запись на параллельные мероприятия 23 октября — выбирай их в программе второго дня",
+            when="parallel_open",
+        ),
+        SwitchTo(Const("Программа"), id="to_program", state=MainParticipantSG.program, when="program_open"),
+        # Пока программа закрыта, кнопка ничего не делает
+        Button(Const(f"{LOCK} Программа"), id="program_locked", when="program_closed"),
         SwitchTo(Const("Поддержка"), id="to_support", state=MainParticipantSG.support),
         state=MainParticipantSG.main,
         getter=get_main_data,
     ),
     support_window(MainParticipantSG.support, MainParticipantSG.main),
+    *program_windows(),
     Window(
         Format(
             "<b>Запись на дебаты</b>\n\n"

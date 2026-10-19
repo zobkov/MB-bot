@@ -12,7 +12,13 @@ from bot.states import GuestSG, MainParticipantSG
 from config.config import Config, normalize_username
 from database.db import Database
 from database.models import ROLE_GUEST, ROLE_MAIN, User
-from database.repositories import DebateRepository, EventRepository, SettingsRepository, UserRepository
+from database.repositories import (
+    DebateRepository,
+    EventRepository,
+    ParallelRepository,
+    SettingsRepository,
+    UserRepository,
+)
 from services.users import check_is_admin, is_main_role, sync_user
 from utils.logging_config import log_user_action
 
@@ -94,6 +100,7 @@ async def cmd_user(message: Message, command: CommandObject, db: Database, confi
         choice = await debate_repo.get_user_choice(user.id)
         titles = {s.code: s.title for s in await debate_repo.get_seats()}
         event_codes = await EventRepository(session).get_user_events(user.id)
+        parallel = await ParallelRepository(session).get_user_events(user.id)
     finally:
         await session.close()
 
@@ -103,6 +110,7 @@ async def cmd_user(message: Message, command: CommandObject, db: Database, confi
     )
     debates = f"{titles.get(choice, choice)} ({choice})" if choice else "нет записи"
     events = ", ".join(sorted(event_codes)) if event_codes else "нет записей"
+    parallel_events = ", ".join(parallel[slot] for slot in sorted(parallel)) if parallel else "нет записей"
 
     await message.answer(
         "<b>Пользователь</b>\n\n"
@@ -114,6 +122,7 @@ async def cmd_user(message: Message, command: CommandObject, db: Database, confi
         f"Админ: {'да' if check_is_admin(user.telegram_id, config) else 'нет'}\n"
         f"Дебаты: {escape(debates)}\n"
         f"Открытые мероприятия: {escape(events)}\n"
+        f"Параллельные мероприятия: {escape(parallel_events)}\n"
         f"Первый вход: {user.created_at:%d.%m.%Y %H:%M}"
     )
 
@@ -153,30 +162,36 @@ async def cmd_cancel_debates(message: Message, command: CommandObject, db: Datab
     )
 
 
+async def _toggle_setting(message: Message, command: CommandObject, db: Database, key: str, subject: str) -> None:
+    """/open_* [1|0]: без аргумента — показать статус флага, с аргументом — переключить.
+    subject — подлежащее женского рода («Запись на дебаты», «Программа»)."""
+    cmd = f"/{command.command}"
+    arg = (command.args or "").strip()
+    session = await db.get_session()
+    try:
+        settings = SettingsRepository(session)
+        if arg not in ("0", "1"):
+            is_open = await settings.get_bool(key)
+            await message.answer(
+                f"{subject} сейчас <b>{'открыта' if is_open else 'закрыта'}</b>.\n\n"
+                f"Использование: <code>{cmd} 1</code> — открыть, <code>{cmd} 0</code> — закрыть"
+            )
+            return
+        await settings.set_bool(key, arg == "1")
+    finally:
+        await session.close()
+
+    log_user_action(message.from_user.id, message.from_user.username, f"ADMIN_{command.command.upper()}", arg)
+    await message.answer(f"{subject} <b>{'открыта' if arg == '1' else 'закрыта'}</b>")
+
+
 @router.message(Command("open_debates"))
 async def cmd_open_debates(message: Message, command: CommandObject, db: Database, config: Config):
     """/open_debates [1|0] — открыть/закрыть запись на дебаты"""
     if not check_is_admin(message.from_user.id, config):
         await message.answer(ACCESS_DENIED)
         return
-
-    arg = (command.args or "").strip()
-    session = await db.get_session()
-    try:
-        settings = SettingsRepository(session)
-        if arg not in ("0", "1"):
-            is_open = await settings.get_bool(SettingsRepository.DEBATES_OPEN)
-            await message.answer(
-                f"Запись на дебаты сейчас <b>{'открыта' if is_open else 'закрыта'}</b>.\n\n"
-                "Использование: <code>/open_debates 1</code> — открыть, <code>/open_debates 0</code> — закрыть"
-            )
-            return
-        await settings.set_bool(SettingsRepository.DEBATES_OPEN, arg == "1")
-    finally:
-        await session.close()
-
-    log_user_action(message.from_user.id, message.from_user.username, "ADMIN_OPEN_DEBATES", arg)
-    await message.answer(f"Запись на дебаты <b>{'открыта' if arg == '1' else 'закрыта'}</b>")
+    await _toggle_setting(message, command, db, SettingsRepository.DEBATES_OPEN, "Запись на дебаты")
 
 
 @router.message(Command("export_debates"))
@@ -219,24 +234,7 @@ async def cmd_open_events(message: Message, command: CommandObject, db: Database
     if not check_is_admin(message.from_user.id, config):
         await message.answer(ACCESS_DENIED)
         return
-
-    arg = (command.args or "").strip()
-    session = await db.get_session()
-    try:
-        settings = SettingsRepository(session)
-        if arg not in ("0", "1"):
-            is_open = await settings.get_bool(SettingsRepository.EVENTS_OPEN)
-            await message.answer(
-                f"Запись на открытые мероприятия сейчас <b>{'открыта' if is_open else 'закрыта'}</b>.\n\n"
-                "Использование: <code>/open_events 1</code> — открыть, <code>/open_events 0</code> — закрыть"
-            )
-            return
-        await settings.set_bool(SettingsRepository.EVENTS_OPEN, arg == "1")
-    finally:
-        await session.close()
-
-    log_user_action(message.from_user.id, message.from_user.username, "ADMIN_OPEN_EVENTS", arg)
-    await message.answer(f"Запись на открытые мероприятия <b>{'открыта' if arg == '1' else 'закрыта'}</b>")
+    await _toggle_setting(message, command, db, SettingsRepository.EVENTS_OPEN, "Запись на открытые мероприятия")
 
 
 @router.message(Command("cancel_event"))
@@ -303,6 +301,98 @@ async def cmd_export_events(message: Message, db: Database, config: Config):
     filename = f"events_{datetime.now():%Y%m%d_%H%M}.csv"
     summary = "\n".join(f"{escape(s.title)} ({s.code}): {s.taken}/{s.capacity}" for s in seats)
     log_user_action(message.from_user.id, message.from_user.username, "ADMIN_EXPORT_EVENTS", f"{len(rows)} rows")
+    await message.answer_document(
+        BufferedInputFile(buffer.getvalue().encode("utf-8"), filename=filename),
+        caption=f"Записей: {len(rows)}\n{summary}",
+    )
+
+
+# ============================================================================
+# ПРОГРАММА И ПАРАЛЛЕЛЬНЫЕ МЕРОПРИЯТИЯ (топ-115)
+# ============================================================================
+
+@router.message(Command("open_program"))
+async def cmd_open_program(message: Message, command: CommandObject, db: Database, config: Config):
+    """/open_program [1|0] — открыть/закрыть программу для топ-115"""
+    if not check_is_admin(message.from_user.id, config):
+        await message.answer(ACCESS_DENIED)
+        return
+    await _toggle_setting(message, command, db, SettingsRepository.PROGRAM_OPEN, "Программа")
+
+
+@router.message(Command("open_parallel"))
+async def cmd_open_parallel(message: Message, command: CommandObject, db: Database, config: Config):
+    """/open_parallel [1|0] — открыть/закрыть запись на параллельные мероприятия"""
+    if not check_is_admin(message.from_user.id, config):
+        await message.answer(ACCESS_DENIED)
+        return
+    await _toggle_setting(message, command, db, SettingsRepository.PARALLEL_OPEN, "Запись на параллельные мероприятия")
+
+
+@router.message(Command("cancel_parallel"))
+async def cmd_cancel_parallel(message: Message, command: CommandObject, db: Database, config: Config):
+    """/cancel_parallel <code> [user_id|username] — удалить запись на параллельное мероприятие (без пользователя — свою)"""
+    if not check_is_admin(message.from_user.id, config):
+        await message.answer(ACCESS_DENIED)
+        return
+
+    parts = (command.args or "").split()
+    session = await db.get_session()
+    try:
+        parallel_repo = ParallelRepository(session)
+        seats = {s.code: s for s in await parallel_repo.get_seats()}
+        if not parts or parts[0] not in seats:
+            await message.answer(
+                "Использование: <code>/cancel_parallel CODE [user_id|username]</code>\n"
+                f"Коды мероприятий: {', '.join(f'<code>{c}</code>' for c in seats)}"
+            )
+            return
+
+        code = parts[0]
+        arg = parts[1] if len(parts) > 1 else str(message.from_user.id)
+        user = await _find_user(UserRepository(session), arg)
+        if user is None:
+            await message.answer(f"Пользователь <code>{escape(arg)}</code> не найден в БД")
+            return
+
+        deleted = await parallel_repo.cancel(user.id, code)
+        s = next(e for e in await parallel_repo.get_seats() if e.code == code)
+    finally:
+        await session.close()
+
+    who = f"@{escape(user.telegram_username)}" if user.telegram_username else f"<code>{user.telegram_id}</code>"
+    if not deleted:
+        await message.answer(f"У {who} нет записи на <b>{escape(s.title)}</b>")
+        return
+
+    log_user_action(message.from_user.id, message.from_user.username, "ADMIN_CANCEL_PARALLEL", f"{user.telegram_id}: {code}")
+    await message.answer(f"Запись {who} на <b>{escape(s.title)}</b> удалена\nСвободно: {s.free}/{s.capacity}")
+
+
+@router.message(Command("export_parallel"))
+async def cmd_export_parallel(message: Message, db: Database, config: Config):
+    """/export_parallel — CSV с записями на параллельные мероприятия"""
+    if not check_is_admin(message.from_user.id, config):
+        await message.answer(ACCESS_DENIED)
+        return
+
+    session = await db.get_session()
+    try:
+        parallel_repo = ParallelRepository(session)
+        rows = await parallel_repo.export_rows()
+        seats = await parallel_repo.get_seats()
+    finally:
+        await session.close()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["user_id", "username", "slot", "event"])
+    for telegram_id, username, slot, code in rows:
+        writer.writerow([telegram_id, username or "", slot, code])
+
+    filename = f"parallel_{datetime.now():%Y%m%d_%H%M}.csv"
+    summary = "\n".join(f"{s.code}: {s.taken}/{s.capacity}" for s in seats)
+    log_user_action(message.from_user.id, message.from_user.username, "ADMIN_EXPORT_PARALLEL", f"{len(rows)} rows")
     await message.answer_document(
         BufferedInputFile(buffer.getvalue().encode("utf-8"), filename=filename),
         caption=f"Записей: {len(rows)}\n{summary}",

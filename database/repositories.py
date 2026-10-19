@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.config import DebateCompany as DebateCompanyConfig
 from config.config import OpenEvent as OpenEventConfig
+from config.config import ProgramItem
 from database.models import (
     ROLE_GUEST,
     ROLE_MAIN,
@@ -15,6 +16,8 @@ from database.models import (
     DebateRegistration,
     EventRegistration,
     OpenEvent,
+    ParallelEvent,
+    ParallelRegistration,
     Setting,
     User,
 )
@@ -81,6 +84,8 @@ class UserRepository:
 class SettingsRepository:
     DEBATES_OPEN = "debates_open"
     EVENTS_OPEN = "events_open"
+    PROGRAM_OPEN = "program_open"    # доступ топ-115 к программе
+    PARALLEL_OPEN = "parallel_open"  # запись топ-115 на параллельные мероприятия
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -390,5 +395,151 @@ class EventRepository:
             .join(EventRegistration, EventRegistration.user_id == User.id)
             .join(OpenEvent, OpenEvent.code == EventRegistration.event_code)
             .order_by(OpenEvent.sort_order, EventRegistration.created_at)
+        )
+        return [tuple(r) for r in result.all()]
+
+
+@dataclass
+class ParallelSeats:
+    code: str
+    slot_code: str
+    title: str
+    capacity: int
+    taken: int
+
+    @property
+    def free(self) -> int:
+        return max(self.capacity - self.taken, 0)
+
+
+class ParallelRepository:
+    """Запись топ-115 на параллельные мероприятия: в каждом слоте — одно мероприятие на человека.
+    Схема блокировок та же, что у DebateRepository: «мероприятие -> запись пользователя в слоте»."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def sync_events(self, items: list[ProgramItem]) -> None:
+        """Синхронизирует мероприятия с записью и их вместимость с программой"""
+        for order, item in enumerate(items):
+            values = {"slot_code": item.slot, "title": item.title, "capacity": item.capacity, "sort_order": order}
+            stmt = (
+                pg_insert(ParallelEvent)
+                .values(code=item.code, **values)
+                .on_conflict_do_update(index_elements=[ParallelEvent.code], set_=values)
+            )
+            await self.session.execute(stmt)
+        await self.session.commit()
+        log_db_operation("SYNC", "conf_parallel_events", f"{len(items)} events")
+
+    async def get_seats(self) -> list[ParallelSeats]:
+        taken = (
+            select(ParallelRegistration.event_code, func.count().label("taken"))
+            .group_by(ParallelRegistration.event_code)
+            .subquery()
+        )
+        result = await self.session.execute(
+            select(
+                ParallelEvent.code, ParallelEvent.slot_code, ParallelEvent.title,
+                ParallelEvent.capacity, func.coalesce(taken.c.taken, 0),
+            )
+            .outerjoin(taken, taken.c.event_code == ParallelEvent.code)
+            .order_by(ParallelEvent.sort_order)
+        )
+        return [
+            ParallelSeats(code=r[0], slot_code=r[1], title=r[2], capacity=r[3], taken=r[4])
+            for r in result.all()
+        ]
+
+    async def get_user_events(self, user_id: int) -> dict[str, str]:
+        """{slot_code: event_code} — на что записан пользователь"""
+        result = await self.session.execute(
+            select(ParallelRegistration.slot_code, ParallelRegistration.event_code)
+            .where(ParallelRegistration.user_id == user_id)
+        )
+        return {slot: code for slot, code in result.all()}
+
+    async def register(self, user_id: int, event_code: str) -> RegisterResult:
+        """Записать пользователя на мероприятие (или сменить запись в этом слоте) в одной транзакции.
+
+        - строка мероприятия блокируется SELECT ... FOR UPDATE, поэтому проверка «есть ли место» и вставка
+          для одного мероприятия выполняются строго по очереди — вместимость не может быть превышена;
+        - запись пользователя в слоте тоже блокируется, а вставка идет через ON CONFLICT (user_id, slot_code),
+          поэтому двойные нажатия не создают двух записей в одном слоте.
+        """
+        try:
+            event = (
+                await self.session.execute(
+                    select(ParallelEvent).where(ParallelEvent.code == event_code).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if event is None:
+                await self.session.rollback()
+                return RegisterResult.UNKNOWN
+
+            current = (
+                await self.session.execute(
+                    select(ParallelRegistration.event_code)
+                    .where(ParallelRegistration.user_id == user_id, ParallelRegistration.slot_code == event.slot_code)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if current == event_code:
+                await self.session.rollback()
+                return RegisterResult.SAME
+
+            taken = (
+                await self.session.execute(
+                    select(func.count()).select_from(ParallelRegistration)
+                    .where(ParallelRegistration.event_code == event_code)
+                )
+            ).scalar_one()
+            if taken >= event.capacity:
+                await self.session.rollback()
+                return RegisterResult.FULL
+
+            stmt = (
+                pg_insert(ParallelRegistration)
+                .values(user_id=user_id, slot_code=event.slot_code, event_code=event_code)
+                .on_conflict_do_update(
+                    constraint="uq_conf_parallel_registrations_user_slot",
+                    set_={"event_code": event_code, "updated_at": func.now()},
+                )
+            )
+            await self.session.execute(stmt)
+            await self.session.commit()
+            log_db_operation("UPSERT", "conf_parallel_registrations", f"{current} -> {event_code}", user_id)
+            return RegisterResult.OK
+        except Exception as e:
+            await self.session.rollback()
+            log_error(e, "Ошибка при записи на параллельное мероприятие", user_id)
+            raise
+
+    async def cancel(self, user_id: int, event_code: str) -> bool:
+        """Удалить запись пользователя на мероприятие. False — записи не было.
+        Удаление только освобождает место, поэтому блокировка мероприятия не нужна."""
+        try:
+            result = await self.session.execute(
+                delete(ParallelRegistration)
+                .where(ParallelRegistration.user_id == user_id, ParallelRegistration.event_code == event_code)
+                .returning(ParallelRegistration.id)
+            )
+            deleted = result.scalar_one_or_none() is not None
+            await self.session.commit()
+            if deleted:
+                log_db_operation("DELETE", "conf_parallel_registrations", f"{event_code} cancelled", user_id)
+            return deleted
+        except Exception as e:
+            await self.session.rollback()
+            log_error(e, "Ошибка при отмене записи на параллельное мероприятие", user_id)
+            raise
+
+    async def export_rows(self) -> list[tuple[int, Optional[str], str, str]]:
+        """(telegram_id, username, slot_code, event_code) по всем записям"""
+        result = await self.session.execute(
+            select(User.telegram_id, User.telegram_username, ParallelRegistration.slot_code, ParallelRegistration.event_code)
+            .join(ParallelRegistration, ParallelRegistration.user_id == User.id)
+            .join(ParallelEvent, ParallelEvent.code == ParallelRegistration.event_code)
+            .order_by(ParallelEvent.sort_order, ParallelRegistration.created_at)
         )
         return [tuple(r) for r in result.all()]

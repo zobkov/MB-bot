@@ -33,6 +33,9 @@ class User(Base):
     event_registrations: Mapped[list["EventRegistration"]] = relationship(
         "EventRegistration", back_populates="user", cascade="all, delete-orphan"
     )
+    parallel_registrations: Mapped[list["ParallelRegistration"]] = relationship(
+        "ParallelRegistration", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class DebateCompany(Base):
@@ -83,6 +86,34 @@ class EventRegistration(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="event_registrations")
+
+
+class ParallelEvent(Base):
+    """Параллельные мероприятия с записью для топ-115 (из config/program.json, синхронизируются при старте).
+    Строка мероприятия также служит замком (SELECT ... FOR UPDATE) при записи — см. ParallelRepository."""
+    __tablename__ = "conf_parallel_events"
+
+    code: Mapped[str] = mapped_column(String(50), primary_key=True)
+    slot_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class ParallelRegistration(Base):
+    """Запись на параллельное мероприятие: в каждом слоте — не больше одной на пользователя"""
+    __tablename__ = "conf_parallel_registrations"
+    __table_args__ = (UniqueConstraint("user_id", "slot_code", name="uq_conf_parallel_registrations_user_slot"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("conf_users.id", ondelete="CASCADE"), nullable=False)
+    # Копия slot_code мероприятия — нужна для уникальности (user_id, slot_code)
+    slot_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(50), ForeignKey("conf_parallel_events.code"), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship("User", back_populates="parallel_registrations")
 
 
 class Setting(Base):

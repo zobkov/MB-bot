@@ -19,6 +19,10 @@ LEXICON_ADMIN_COMMANDS_RU: dict[str, str] = {
     "/open_events": "[1|0] Открыть/закрыть запись на открытые мероприятия",
     "/cancel_event": "CODE [user_id|username] Удалить запись на мероприятие",
     "/export_events": "CSV с записями на открытые мероприятия",
+    "/open_program": "[1|0] Открыть/закрыть программу для топ-115",
+    "/open_parallel": "[1|0] Открыть/закрыть запись на параллельные мероприятия",
+    "/cancel_parallel": "CODE [user_id|username] Удалить запись на параллельное мероприятие",
+    "/export_parallel": "CSV с записями на параллельные мероприятия",
 }
 
 

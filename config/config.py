@@ -51,12 +51,58 @@ class OpenEvent:
 
 
 @dataclass
+class ProgramItem:
+    code: str         # уникальный во всей программе; у мероприятий с записью — алиас для экспорта
+    alias: str        # короткое название для кнопки (параллельные мероприятия стоят в одной строке)
+    title: str        # полное название: расписание дня и карточка
+    time: str         # время текстом, может быть пустым
+    place: str        # аудитория, может быть пустой
+    description: str  # текст карточки, HTML (<b>, <i>; & и < экранировать)
+    # Слот записи на параллельные мероприятия: в одном слоте — одна запись на человека.
+    # Пусто — мероприятие без записи.
+    slot: str = ""
+    capacity: int = 0
+    # Показывать в карточке, на какую компанию дебатов записан участник
+    show_debate_choice: bool = False
+
+
+@dataclass
+class ProgramDay:
+    code: str
+    title: str  # заголовок окна и текст кнопки дня
+    date: str   # дата для карточки мероприятия
+    items: list[ProgramItem] = field(default_factory=list)
+
+
+@dataclass
+class Program:
+    """Программа для участников топ-115 (config/program.json)"""
+    days: list[ProgramDay] = field(default_factory=list)
+
+    def get_day(self, code: str) -> Optional[ProgramDay]:
+        return next((d for d in self.days if d.code == code), None)
+
+    def get_item(self, code: str) -> Optional[tuple[ProgramDay, ProgramItem]]:
+        for day in self.days:
+            for item in day.items:
+                if item.code == code:
+                    return day, item
+        return None
+
+    @property
+    def parallel_items(self) -> list[ProgramItem]:
+        """Мероприятия с записью, в порядке программы"""
+        return [item for day in self.days for item in day.items if item.slot]
+
+
+@dataclass
 class ConferenceConfig:
     support_contact: str
     tech_contact: str
     debate_companies: list[DebateCompany]
     # Открытые мероприятия (запись гостей), порядок — как в конфиге
     open_events: list[OpenEvent] = field(default_factory=list)
+    program: Program = field(default_factory=Program)
     # Ники топ-115 в нижнем регистре и без @
     main_usernames: set[str] = field(default_factory=set)
     # user_id участников топ-115 без username
@@ -104,6 +150,35 @@ def _load_main_usernames(csv_path: str) -> set[str]:
     return usernames
 
 
+def _load_program(path: str) -> Program:
+    """Загружает программу из program.json. Коды мероприятий — id кнопок и ключи в БД, поэтому уникальны."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    days = [
+        ProgramDay(
+            code=d["code"],
+            title=d["title"],
+            date=d["date"],
+            items=[ProgramItem(**item) for item in d.get("items", [])],
+        )
+        for d in raw.get("days", [])
+    ]
+
+    codes = [d.code for d in days] + [item.code for d in days for item in d.items]
+    duplicates = {c for c in codes if codes.count(c) > 1}
+    if duplicates:
+        raise ValueError(f"Повторяющиеся коды в программе: {', '.join(sorted(duplicates))}")
+    for d in days:
+        for item in d.items:
+            if item.slot and item.capacity <= 0:
+                raise ValueError(f"У мероприятия с записью {item.code} не указана вместимость")
+
+    program = Program(days=days)
+    logger.info(f"Загружена программа: {len(days)} дн., мероприятий с записью — {len(program.parallel_items)}")
+    return program
+
+
 def load_config(path: str = None) -> Config:
     # Загружаем JSON конфигурацию (несекретные данные)
     config_path = path or os.path.join(os.path.dirname(__file__), "conference_config.json")
@@ -135,6 +210,7 @@ def load_config(path: str = None) -> Config:
         tech_contact=json_config.get("tech_contact", "@zobko"),
         debate_companies=[DebateCompany(**c) for c in json_config.get("debate_companies", [])],
         open_events=[OpenEvent(**e) for e in json_config.get("open_events", [])],
+        program=_load_program(os.path.join(os.path.dirname(config_path), "program.json")),
         main_usernames=_load_main_usernames(participants.get("usernames_csv", "115users.csv")),
         main_user_ids={int(i) for i in participants.get("extra_user_ids", [])},
     )
